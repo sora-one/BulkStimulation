@@ -1,6 +1,6 @@
 #' @title RNA-seq 数据模拟管道
 #' @description 一个用于生成模拟单细胞和bulk RNA-seq数据的综合管道
-#' @author 高级生物信息学家
+#' @author XushengWan
 #' @date 2025-08-25
 #' 
 #' 本脚本提供了一个完整的框架，用于:
