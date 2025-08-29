@@ -1,176 +1,173 @@
 # ============================================================================
-# Confounding Factor Correction for RNA-Seq Data
+# RNA-Seq数据的混杂因素校正
 # ============================================================================
-# This script contains functions to apply various correction methods
-# for known and unknown confounding factors in RNA-seq data, as described in
-# Cote et al. (2022, DOI: 10.1186/s13059-022-02606-0)
+# 本脚本包含用于RNA-seq数据中已知和未知混杂因素的各种校正方法的函数，
+# 参照Cote等人(2022, DOI: 10.1186/s13059-022-02606-0)的研究
 # ============================================================================
 
-# Load required libraries
+# 加载所需的库
 suppressPackageStartupMessages({
-  library(DESeq2)       # For variance stabilizing transformation
-  library(limma)        # For removeBatchEffect and voom
-  library(sva)          # For SVA and num.sv functions
-  library(matrixStats)  # For rowVars
-  library(PEER)         # For PEER correction
-  library(RUVcorr)      # For RUVCorr
-  library(BiocParallel) # For parallel processing
-  library(ggplot2)      # For visualization
-  library(dplyr)        # For data manipulation
+  library(DESeq2)       # 用于方差稳定转换
+  library(limma)        # 用于removeBatchEffect和voom函数
+  library(sva)          # 用于SVA和num.sv函数
+  library(matrixStats)  # 用于rowVars函数
+  library(PEER)         # 用于PEER校正
+  library(RUVcorr)      # 用于RUVCorr校正
+  library(BiocParallel) # 用于并行处理
+  library(ggplot2)      # 用于可视化
+  library(dplyr)        # 用于数据操作
 })
 
-#' Apply Multiple Confounding Factor Correction Methods to RNA-Seq Data
+#' 对RNA-Seq数据应用多种混杂因素校正方法
 #'
-#' This function applies various correction methods to RNA-seq data to remove
-#' the effects of technical and biological confounding factors.
+#' 此函数对RNA-seq数据应用各种校正方法，以消除技术和生物混杂因素的影响。
 #'
-#' @param sim_data A list containing simulated RNA-seq data with elements:
-#'   - bulk_counts: A matrix of raw gene expression counts (genes x samples)
-#'   - bulk_metadata: A data frame with sample metadata
-#'   - gene_metadata: A data frame with gene metadata
+#' @param sim_data 包含模拟RNA-seq数据的列表，包含以下元素:
+#'   - bulk_counts: 原始基因表达计数矩阵（基因 x 样本）
+#'   - bulk_metadata: 样本元数据数据框
+#'   - gene_metadata: 基因元数据数据框
 #'
-#' @return A list of corrected expression matrices, each named after the
-#'         correction method applied.
+#' @return 一个校正后表达矩阵的列表，每个矩阵以应用的校正方法命名。
 #'
 apply_all_corrections <- function(sim_data) {
   
-  # Extract data from the input list
+  # 从输入列表中提取数据
   bulk_counts <- sim_data$bulk_counts
   bulk_metadata <- sim_data$bulk_metadata
   gene_metadata <- sim_data$gene_metadata
   
-  # Check input data
+  # 检查输入数据
   if (is.null(bulk_counts) || is.null(bulk_metadata) || is.null(gene_metadata)) {
-    stop("Input data must contain bulk_counts, bulk_metadata, and gene_metadata")
+    stop("输入数据必须包含bulk_counts、bulk_metadata和gene_metadata")
   }
   
-  # Make sure sample names match between counts and metadata
+  # 确保样本名称在计数矩阵和元数据之间匹配
   if (!identical(colnames(bulk_counts), rownames(bulk_metadata))) {
-    stop("Sample names in bulk_counts and bulk_metadata do not match")
+    stop("bulk_counts中的样本名称与bulk_metadata中的不匹配")
   }
   
-  # Make sure gene names match between counts and metadata
+  # 确保基因名称在计数矩阵和元数据之间匹配
   if (!identical(rownames(bulk_counts), rownames(gene_metadata))) {
-    stop("Gene names in bulk_counts and gene_metadata do not match")
+    stop("bulk_counts中的基因名称与gene_metadata中的不匹配")
   }
   
-  # Create a list to store all corrected matrices
+  # 创建一个列表存储所有校正后的矩阵
   corrected_matrices <- list()
   
   # ============================================================================
-  # 1. Data Normalization
+  # 1. 数据标准化
   # ============================================================================
-  message("Performing variance stabilizing transformation...")
+  message("执行方差稳定转换...")
   
-  # Create DESeqDataSet object
+  # 创建DESeqDataSet对象
   dds <- DESeqDataSetFromMatrix(
     countData = bulk_counts,
     colData = bulk_metadata,
     design = ~ group
   )
   
-  # Apply variance stabilizing transformation
+  # 应用方差稳定转换
   vsd <- vst(dds, blind = FALSE)
   
-  # Extract the normalized matrix
+  # 提取标准化后的矩阵
   normalized_matrix <- assay(vsd)
   
-  # Add to the results list
+  # 添加到结果列表
   corrected_matrices$normalized_uncorrected <- normalized_matrix
   
   # ============================================================================
-  # 2. Known Covariate Regression
+  # 2. 已知协变量回归
   # ============================================================================
-  message("Applying known covariate regression...")
+  message("应用已知协变量回归...")
   
-  # Create design matrix for the biological factor (group)
+  # 为生物学因素(group)创建设计矩阵
   design <- model.matrix(~ group, data = bulk_metadata)
   
-  # Identify cell type proportion columns (starting with "prop_")
+  # 识别细胞类型比例列（以"prop_"开头）
   prop_cols <- grep("^prop_", names(bulk_metadata), value = TRUE)
   
   if (length(prop_cols) == 0) {
-    warning("No cell type proportion columns found in bulk_metadata")
+    warning("在bulk_metadata中未找到细胞类型比例列")
     covariates <- model.matrix(~ batch, data = bulk_metadata)[, -1, drop = FALSE]
   } else {
-    # Create covariate matrix for batch and cell type proportions
+    # 为批次和细胞类型比例创建协变量矩阵
     covariates <- model.matrix(
       as.formula(paste("~ batch +", paste(prop_cols, collapse = " + "))),
       data = bulk_metadata
-    )[, -1, drop = FALSE]  # Remove intercept
+    )[, -1, drop = FALSE]  # 移除截距
   }
   
-  # Apply removeBatchEffect to correct for known covariates
+  # 应用removeBatchEffect校正已知协变量
   known_covariates_matrix <- limma::removeBatchEffect(
     normalized_matrix,
     covariates = covariates,
     design = design
   )
   
-  # Add to the results list
+  # 添加到结果列表
   corrected_matrices$known_covariates <- known_covariates_matrix
   
   # ============================================================================
-  # 3. Principal Component Regression (PCR)
+  # 3. 主成分回归 (PCR)
   # ============================================================================
-  message("Applying principal component regression...")
+  message("应用主成分回归...")
   
-  # Filter genes with low variance
+  # 过滤低方差基因
   gene_vars <- rowVars(normalized_matrix)
   high_var_genes <- which(gene_vars > quantile(gene_vars, 0.5))
   
-  # Perform PCA on high-variance genes
+  # 对高变异基因进行PCA
   pca_data <- prcomp(t(normalized_matrix[high_var_genes, ]), scale = TRUE, center = TRUE)
   
-  # Determine the number of significant PCs to remove
-  # Create design matrix for the biological factor (group) only
+  # 确定要移除的显著PC数量
+  # 仅为生物学因素(group)创建设计矩阵
   mod <- model.matrix(~ group, data = bulk_metadata)
   mod0 <- model.matrix(~ 1, data = bulk_metadata)
   
-  # Estimate the number of surrogate variables
+  # 估计替代变量的数量
   n_sv <- num.sv(normalized_matrix, mod, method = "be", B = 20)
-  message(paste("Estimated number of significant PCs:", n_sv))
+  message(paste("估计的显著PC数量:", n_sv))
   
-  # Create a matrix of the PCs to regress out
+  # 创建要回归的PC矩阵
   pcs_to_regress <- pca_data$x[, 1:n_sv, drop = FALSE]
   
-  # Apply removeBatchEffect to remove the effect of significant PCs
+  # 应用removeBatchEffect移除显著PC的影响
   pc_corrected_matrix <- limma::removeBatchEffect(
     normalized_matrix,
     covariates = pcs_to_regress,
     design = mod
   )
   
-  # Add to the results list
+  # 添加到结果列表
   corrected_matrices$pc_correction <- pc_corrected_matrix
   
   # ============================================================================
-  # 4. Surrogate Variable Analysis (SVA)
+  # 4. 替代变量分析 (SVA)
   # ============================================================================
-  message("Applying surrogate variable analysis...")
+  message("应用替代变量分析...")
   
-  # Perform SVA
+  # 执行SVA
   sva_result <- sva(normalized_matrix, mod, mod0, n.sv = n_sv)
   
-  # Extract surrogate variables
+  # 提取替代变量
   sv <- sva_result$sv
   
-  # Apply removeBatchEffect to remove the effect of surrogate variables
+  # 应用removeBatchEffect移除替代变量的影响
   sva_corrected_matrix <- limma::removeBatchEffect(
     normalized_matrix,
     covariates = sv,
     design = mod
   )
   
-  # Add to the results list
+  # 添加到结果列表
   corrected_matrices$sva_correction <- sva_corrected_matrix
   
   # ============================================================================
-  # 5. PEER (Probabilistic Estimation of Expression Residuals)
+  # 5. PEER (表达残差的概率估计)
   # ============================================================================
-  message("Applying PEER correction...")
+  message("应用PEER校正...")
   
-  # Determine the number of PEER factors based on sample size
+  # 根据样本大小确定PEER因子的数量
   n_samples <- ncol(bulk_counts)
   if (n_samples < 150) {
     n_factors <- 15
@@ -181,93 +178,93 @@ apply_all_corrections <- function(sim_data) {
   } else {
     n_factors <- 60
   }
-  message(paste("Using", n_factors, "PEER factors for", n_samples, "samples"))
+  message(paste("对", n_samples, "个样本使用", n_factors, "个PEER因子"))
   
-  # Set up PEER model
+  # 设置PEER模型
   peer_model <- PEER()
   PEER_setPhenoMean(peer_model, t(normalized_matrix))
   
-  # Add known covariates (group) to protect biological signal
+  # 添加已知协变量(group)以保护生物学信号
   PEER_setNk(peer_model, n_factors)
   PEER_update(peer_model)
   
-  # Get residuals (corrected data)
+  # 获取残差（校正后的数据）
   residuals <- t(PEER_getResiduals(peer_model))
   rownames(residuals) <- rownames(normalized_matrix)
   colnames(residuals) <- colnames(normalized_matrix)
   
-  # Add to the results list
+  # 添加到结果列表
   corrected_matrices$peer_correction <- residuals
   
   # ============================================================================
   # 6. RUVCorr
   # ============================================================================
-  message("Applying RUVCorr correction...")
+  message("应用RUVCorr校正...")
   
-  # Find negative control genes (genes not in any module)
+  # 寻找阴性对照基因（不在任何模块中的基因）
   module_cols <- grep("^in_module_", colnames(gene_metadata), value = TRUE)
   
   if (length(module_cols) == 0) {
-    warning("No in_module columns found in gene_metadata; using all genes for RUVCorr")
+    warning("在gene_metadata中未找到in_module列；对RUVCorr使用所有基因")
     control_genes <- rep(TRUE, nrow(gene_metadata))
   } else {
-    # Select genes that are not in any module
+    # 选择不在任何模块中的基因
     control_genes <- rowSums(gene_metadata[, module_cols, drop = FALSE]) == 0
   }
   
-  # If no control genes are found, use genes with lowest variance
+  # 如果未找到阴性对照基因，则使用方差最低的基因
   if (sum(control_genes) < 10) {
-    warning("Fewer than 10 control genes found; using 10% of genes with lowest variance")
+    warning("找到的阴性对照基因少于10个；使用方差最低的10%的基因")
     control_genes <- gene_vars <= quantile(gene_vars, 0.1)
   }
   
-  message(paste("Using", sum(control_genes), "negative control genes for RUVCorr"))
+  message(paste("为RUVCorr使用", sum(control_genes), "个阴性对照基因"))
   
-  # Set number of unwanted variation factors to remove (k)
-  k <- min(5, ncol(bulk_counts) / 10)  # Use 5 or 10% of sample size, whichever is smaller
+  # 设置要移除的非期望变异因子数量(k)
+  k <- min(5, ncol(bulk_counts) / 10)  # 使用5或样本大小的10%，取较小值
   
-  # Apply RUVCorr
+  # 应用RUVCorr
   ruv_result <- RUVcorr(Y = normalized_matrix, 
                         X = model.matrix(~ group, data = bulk_metadata),
                         ctl = control_genes, 
                         k = k)
   
-  # Extract corrected matrix
+  # 提取校正后的矩阵
   ruv_corrected_matrix <- ruv_result$Y_corr
   
-  # Add to the results list
+  # 添加到结果列表
   corrected_matrices$ruv_corr <- ruv_corrected_matrix
   
   # ============================================================================
-  # Return all corrected matrices
+  # 返回所有校正后的矩阵
   # ============================================================================
-  message("All correction methods applied successfully.")
+  message("所有校正方法已成功应用。")
   return(corrected_matrices)
 }
 
 # ============================================================================
-# Example usage
+# 使用示例
 # ============================================================================
 
-#' Example of how to use the apply_all_corrections function
+#' apply_all_corrections函数的使用示例
 example_usage <- function() {
-  # Load simulated data
-  # Replace with your actual file path
+  # 加载模拟数据
+  # 替换为你的实际文件路径
   sim_data <- readRDS("path/to/your/simulated_data.rds")
   
-  # Apply all correction methods
+  # 应用所有校正方法
   corrected_data <- apply_all_corrections(sim_data)
   
-  # Print dimensions of each corrected matrix
+  # 打印每个校正矩阵的维度
   for (method_name in names(corrected_data)) {
     matrix_dim <- dim(corrected_data[[method_name]])
-    cat(sprintf("%s: %d genes × %d samples\n", 
+    cat(sprintf("%s: %d基因 × %d样本\n", 
                 method_name, matrix_dim[1], matrix_dim[2]))
   }
   
-  # Return the corrected data
+  # 返回校正后的数据
   return(corrected_data)
 }
 
-# Uncomment to run the example
+# 取消注释以运行示例
 # results <- example_usage()
